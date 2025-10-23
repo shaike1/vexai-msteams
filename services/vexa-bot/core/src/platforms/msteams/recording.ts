@@ -54,7 +54,7 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
         platform: botConfig.platform,
         token: botConfig.token,
         meeting_url: botConfig.meetingUrl || "unknown",
-        meeting_id: (botConfig as any).meeting_id || "unknown"
+        meeting_id: botConfig.nativeMeetingId || "unknown"
       };
       log(`[Node.js WS] Sending config: ${JSON.stringify(config)}`);
       ws.send(JSON.stringify(config));

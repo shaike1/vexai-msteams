@@ -123,6 +123,9 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
                     logger.warning(f"Message {message_id} (type: {message_type}) missing common required fields (token, platform, meeting_id). Skipping. Payload: {payload_json[:200]}...")
                     return True
 
+                # Convert native_meeting_id to string to match database VARCHAR type
+                native_meeting_id = str(native_meeting_id)
+
                 user = await get_user_by_token(token, db)
                 
                 stmt_meeting = select(Meeting).where(
