@@ -287,6 +287,22 @@ services:
     ports:
       - "${POSTGRES_HOST_PORT:-5438}:5432"
 
+  streamlit-dashboard:
+    build:
+      context: ./services/streamlit-ui
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://api-gateway:8000
+      - API_KEY=${ADMIN_API_TOKEN:-token}
+    depends_on:
+      api-gateway:
+        condition: service_started
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
 volumes:
   redis-data:
   postgres-data:

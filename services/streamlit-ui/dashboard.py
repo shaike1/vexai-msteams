@@ -22,14 +22,28 @@ st.markdown("""
 
 def check_api_connection():
     try:
-        r = requests.get(f"{API_URL}/bots", headers={"X-API-Key": API_KEY}, timeout=2)
+        r = requests.get(f"{API_URL}/bots/status", headers={"X-API-Key": API_KEY}, timeout=2)
         return r.status_code == 200
     except: return False
 
 def get_bots():
     try:
-        r = requests.get(f"{API_URL}/bots", headers={"X-API-Key": API_KEY}, timeout=5)
-        return r.json() if r.status_code == 200 else []
+        r = requests.get(f"{API_URL}/bots/status", headers={"X-API-Key": API_KEY}, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            bots = []
+            for bot in data.get('running_bots', []):
+                bots.append({
+                    'id': int(bot.get('meeting_id_from_name', 0)) if bot.get('meeting_id_from_name') else 0,
+                    'platform': bot.get('platform', ''),
+                    'native_meeting_id': bot.get('native_meeting_id', ''),
+                    'status': 'active' if bot.get('normalized_status') == 'Up' else 'unknown',
+                    'container_id': bot.get('container_id', ''),
+                    'created_at': bot.get('created_at', ''),
+                    'container_name': bot.get('container_name', '')
+                })
+            return bots
+        return []
     except Exception as e:
         st.error(f"⚠️ API Error: {str(e)}")
         return []
