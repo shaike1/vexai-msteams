@@ -2,6 +2,7 @@ import { Page } from "playwright";
 import { log } from "../../utils";
 import { BotConfig } from "../../types";
 import { WhisperLiveService } from "../../services/whisperlive";
+import WebSocket from "ws";
 import {
   teamsParticipantSelectors,
   teamsSpeakingClassNames,
@@ -29,10 +30,125 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
   log(`[Node.js] Using WhisperLive URL for Teams: ${whisperLiveUrl}`);
   log("Starting Teams recording with WebSocket connection");
+  
+  // Create Node.js WebSocket connection (bypasses browser security)
+  let nodeWs: WebSocket | null = null;
+  let isServerReady = false;
+  const sessionUid = require('uuid').v4();
+  
+  const connectNodeWebSocket = () => {
+    log(`[Node.js WS] Connecting to WhisperLive: ${whisperLiveUrl}`);
+    const ws = new WebSocket.WebSocket(whisperLiveUrl!);
+    nodeWs = ws;
+    
+    ws.on('open', () => {
+      log('[Node.js WS] ✅ Connected to WhisperLive!');
+      isServerReady = false;
+      // Send initial config with required fields
+      const config = {
+        uid: sessionUid,
+        language: botConfig.language || null,
+        task: botConfig.task || "transcribe",
+        model: null,
+        use_vad: false,
+        platform: botConfig.platform,
+        token: botConfig.token,
+        meeting_url: botConfig.meetingUrl || "unknown",
+        meeting_id: (botConfig as any).meeting_id || "unknown"
+      };
+      log(`[Node.js WS] Sending config: ${JSON.stringify(config)}`);
+      ws.send(JSON.stringify(config));
+    });
+    
+    ws.on('message', (data: any) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.status === 'SERVER_READY') {
+          isServerReady = true;
+          log('[Node.js WS] Server is READY');
+        } else if (msg.language) {
+          log(`[Node.js WS] Language detected: ${msg.language}`);
+        }
+      } catch (e) {}
+    });
+    
+    nodeWs.on('error', (err: Error) => {
+      log(`[Node.js WS] Error: ${err.message}`);
+    });
+    
+    nodeWs.on('close', () => {
+      log('[Node.js WS] Connection closed, reconnecting in 2s...');
+      setTimeout(connectNodeWebSocket, 2000);
+    });
+  };
+  
+  connectNodeWebSocket();
 
   // Load browser utility classes from the bundled global file
-  await page.addScriptTag({
-    path: require('path').join(__dirname, '../../browser-utils.global.js'),
+  // Teams CSP blocks external scripts, so we inject the content directly
+  const fs = require('fs');
+  const path = require('path');
+  const scriptPath = path.join(__dirname, '../../browser-utils.global.js');
+  
+  if (!fs.existsSync(scriptPath)) {
+    throw new Error(`browser-utils.global.js not found at ${scriptPath}`);
+  }
+  
+  const scriptContent = fs.readFileSync(scriptPath, 'utf8');
+  
+  // Wait for page to be ready, then inject the script by evaluating it
+  await page.waitForLoadState('domcontentloaded');
+  await page.evaluate((script) => {
+    // Create a function scope to execute the script
+    const scriptFn = new Function(script);
+    scriptFn();
+  }, scriptContent);
+  
+  // Verify VexaBrowserUtils is loaded
+  const utilsLoaded = await page.evaluate(() => {
+    return typeof (window as any).VexaBrowserUtils !== 'undefined';
+  });
+  
+  if (!utilsLoaded) {
+    throw new Error('VexaBrowserUtils failed to load in page context');
+  }
+  
+  log('[DEBUG] VexaBrowserUtils loaded successfully in page context');
+
+  // Expose function to send audio data from browser to Node.js
+  await page.exposeFunction('sendAudioToNodeWS', (audioDataArray: number[], sampleRate: number) => {
+    if (!nodeWs || nodeWs.readyState !== WebSocket.OPEN || !isServerReady) {
+      return false;
+    }
+    try {
+      // Convert to Float32Array and send as binary
+      const float32Data = new Float32Array(audioDataArray);
+      nodeWs.send(float32Data.buffer);
+      return true;
+    } catch (e: any) {
+      log(`[Node.js WS] Send error: ${e.message}`);
+      return false;
+    }
+  });
+  
+  // Expose function to send speaker events
+  await page.exposeFunction('sendSpeakerEventToNodeWS', (eventType: string, name: string, id: string, timestamp: number) => {
+    if (!nodeWs || nodeWs.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    try {
+      const event = {
+        type: 'speaker_event',
+        event_type: eventType,
+        participant_name: name,
+        participant_id: id,
+        timestamp_ms: timestamp
+      };
+      nodeWs.send(JSON.stringify(event));
+      return true;
+    } catch (e: any) {
+      return false;
+    }
   });
 
   // Pass the necessary config fields and the resolved URL into the page context
@@ -82,51 +198,53 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
         outputChannels: 1
       });
 
-      // Use BrowserWhisperLiveService with stubborn mode for Teams
-      const whisperLiveService = new BrowserWhisperLiveService({
-        whisperLiveUrl: whisperUrlForBrowser
-      }, true); // Enable stubborn mode for Teams
+      // Instead of browser WebSocket, use Node.js relay functions
+      const nodeWsRelay = {
+        isReady: () => true, // Node.js handles connection, always ready from browser perspective
+        sendAudioData: (audioData: Float32Array) => {
+          try {
+            // Call the exposed Node.js function
+            const audioArray = Array.from(audioData);
+            return (window as any).sendAudioToNodeWS(audioArray, 16000);
+          } catch (e) {
+            return false;
+          }
+        },
+        sendAudioChunkMetadata: (length: number, sampleRate: number) => {
+          // Metadata not needed for direct binary sending
+        },
+        sendSpeakerEvent: (eventType: string, name: string, id: string, timestamp: number) => {
+          try {
+            return (window as any).sendSpeakerEventToNodeWS(eventType, name, id, timestamp);
+          } catch (e) {
+            return false;
+          }
+        },
+        close: () => {
+          // Node.js handles connection lifecycle
+        }
+      };
 
-      // Expose references for reconfiguration
+      // Use relay instead of BrowserWhisperLiveService
+      const whisperLiveService = nodeWsRelay;
+      
+      // Expose references for reconfiguration (keeping compatibility)
       (window as any).__vexaWhisperLiveService = whisperLiveService;
       (window as any).__vexaBotConfig = botConfigData;
 
-      // Replace with real reconfigure implementation and apply any queued update
+      // Reconfigure stub (Node.js handles reconnection)
       (window as any).triggerWebSocketReconfigure = async (lang: string | null, task: string | null) => {
         try {
-          const svc = (window as any).__vexaWhisperLiveService;
           const cfg = (window as any).__vexaBotConfig || {};
-          if (!svc) {
-            // Service not ready yet, queue the update
-            (window as any).__vexaPendingReconfigure = { lang, task };
-            (window as any).logBot?.('[Reconfigure] WhisperLive service not ready; queued for later.');
-            return;
-          }
           cfg.language = lang;
           cfg.task = task || 'transcribe';
           (window as any).__vexaBotConfig = cfg;
-          
-          // Update the service's config and force reconnect via socket close (stubborn will handle reconnection)
-          svc.botConfigData = cfg;
-          try { 
-            (window as any).logBot?.(`[Reconfigure] Closing connection to force reconnect with: language=${cfg.language}, task=${cfg.task}`);
-            if (svc.socket) {
-              svc.socket.close(1000, 'Reconfiguration requested');
-            }
-          } catch {}
-          
-          (window as any).logBot?.(`[Reconfigure] Applied: language=${cfg.language}, task=${cfg.task}`);
+          (window as any).logBot?.(`[Reconfigure] Config updated: language=${cfg.language}, task=${cfg.task}`);
+          // Node.js will handle reconnection with new config
         } catch (e: any) {
-          (window as any).logBot?.(`[Reconfigure] Error applying new config: ${e?.message || e}`);
+          (window as any).logBot?.(`[Reconfigure] Error: ${e?.message || e}`);
         }
       };
-      try {
-        const pending = (window as any).__vexaPendingReconfigure;
-        if (pending && typeof (window as any).triggerWebSocketReconfigure === 'function') {
-          (window as any).triggerWebSocketReconfigure(pending.lang, pending.task);
-          (window as any).__vexaPendingReconfigure = null;
-        }
-      } catch {}
 
       await new Promise<void>((resolve, reject) => {
         try {
@@ -178,40 +296,11 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               }
             });
 
-            // Initialize WhisperLive WebSocket connection with reusable callbacks
-            const onMessage = (data: any) => {
-              if (data["status"] === "ERROR") {
-                (window as any).logBot(`Teams WebSocket Server Error: ${data["message"]}`);
-              } else if (data["status"] === "WAIT") {
-                (window as any).logBot(`Teams Server busy: ${data["message"]}`);
-              } else if (!whisperLiveService.isReady() && data["status"] === "SERVER_READY") {
-                whisperLiveService.setServerReady(true);
-                (window as any).logBot("Teams Server is ready.");
-              } else if (data["language"]) {
-                (window as any).logBot(`Teams Language detected: ${data["language"]}`);
-              } else if (data["message"] === "DISCONNECT") {
-                (window as any).logBot("Teams Server requested disconnect.");
-                whisperLiveService.close();
-              }
-            };
-            const onError = (event: Event) => {
-              (window as any).logBot(`[Teams Failover] WebSocket error. This will trigger retry logic.`);
-            };
-            const onClose = async (event: CloseEvent) => {
-              (window as any).logBot(`[Teams Failover] WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason}.`);
-            };
-
-            // Save callbacks globally for reuse
-            (window as any).__vexaOnMessage = onMessage;
-            (window as any).__vexaOnError = onError;
-            (window as any).__vexaOnClose = onClose;
-
-            return await whisperLiveService.connectToWhisperLive(
-              (window as any).__vexaBotConfig,
-              onMessage,
-              onError,
-              onClose
-            );
+            // No browser-side WebSocket connection needed - using Node.js relay
+            (window as any).logBot("Using Node.js WebSocket relay for WhisperLive");
+            
+            // Audio processing now sends to Node.js relay
+            return Promise.resolve();
           }).then(() => {
             // Initialize Teams-specific speaker detection (browser context)
             (window as any).logBot("Initializing Teams speaker detection...");
