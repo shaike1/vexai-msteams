@@ -39,8 +39,11 @@ def get_bots():
                     'native_meeting_id': bot.get('native_meeting_id', ''),
                     'status': 'active' if bot.get('normalized_status') == 'Up' else 'unknown',
                     'container_id': bot.get('container_id', ''),
+                    'container_name': bot.get('container_name', ''),
+                    'container_status': bot.get('status', ''),
+                    'normalized_status': bot.get('normalized_status', ''),
                     'created_at': bot.get('created_at', ''),
-                    'container_name': bot.get('container_name', '')
+                    'labels': bot.get('labels', {})
                 })
             return bots
         return []
@@ -67,6 +70,31 @@ def delete_bot(bot_id):
         r = requests.delete(f"{API_URL}/bots/{bot_id}", headers={"X-API-Key": API_KEY}, timeout=5)
         return r.status_code in [200, 204]
     except: return False
+
+def stop_container(container_id):
+    """Stop a container directly via Docker command (requires proper setup)"""
+    try:
+        import subprocess
+        result = subprocess.run(['docker', 'stop', container_id], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except: return False
+
+def remove_container(container_id):
+    """Remove a container directly via Docker command"""
+    try:
+        import subprocess
+        result = subprocess.run(['docker', 'rm', '-f', container_id], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except: return False
+
+def get_container_logs(container_id, tail=100):
+    """Get container logs"""
+    try:
+        import subprocess
+        result = subprocess.run(['docker', 'logs', '--tail', str(tail), container_id], 
+                              capture_output=True, text=True, timeout=5)
+        return result.stdout if result.returncode == 0 else None
+    except: return None
 
 def get_status_emoji(status):
     return {"requested":"🔵","joining":"🔄","awaiting_admission":"🟡","active":"🟢","completed":"⚫","failed":"🔴"}.get(status,"⚪")
@@ -143,7 +171,7 @@ with st.sidebar:
     st.caption(f"🔗 {API_URL.split('//')[1]}")
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs(["📋 Bots", "➕ Deploy", "📝 Transcripts", "📊 Analytics"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Bots", "➕ Deploy", "📝 Transcripts", "📊 Analytics", "🐳 Containers"])
 
 # Tab 1: Bots
 with tab1:
@@ -166,6 +194,8 @@ with tab1:
                     st.write(f"**Meeting:** {bot.get('native_meeting_id','N/A')}")
                     st.write(f"**Platform:** {bot.get('platform','N/A').upper()}")
                     st.write(f"**Status:** {status.replace('_',' ').title()}")
+                    st.caption(f"🐳 Container: `{bot.get('container_name','N/A')}`")
+                    st.caption(f"📦 Status: {bot.get('container_status','N/A')}")
                     
                     if status == 'active' and bot.get('start_time'):
                         dur = format_duration(bot.get('start_time'))
@@ -178,6 +208,7 @@ with tab1:
                     st.write(f"📅 **Created:** {bot.get('created_at','N/A')[:16]}")
                     if status == 'active':
                         st.caption("💬 Transcribing...")
+                    st.caption(f"🔗 ID: `{bot.get('container_id','')[:12]}`")
                 
                 with col3:
                     st.write("")
@@ -299,6 +330,122 @@ with tab4:
         st.subheader("Recent Bots")
         df = pd.DataFrame([{'ID':b.get('id'),'Platform':b.get('platform','').upper(),'Status':b.get('status',''),'Created':b.get('created_at','')[:16]} for b in bots[-10:]])
         st.dataframe(df, use_container_width=True)
+
+# Tab 5: Container Management
+with tab5:
+    st.subheader("🐳 Container Management")
+    st.markdown("Real-time container status and control for Vexa bots")
+    
+    bots = get_bots()
+    
+    if not bots:
+        st.info("No containers running")
+    else:
+        st.markdown(f"### Running Containers ({len(bots)})")
+        
+        for bot in bots:
+            with st.expander(f"🐳 {bot.get('container_name', 'Unknown')} - {bot.get('normalized_status', 'Unknown')}", expanded=False):
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    st.markdown("#### Container Details")
+                    st.write(f"**Name:** `{bot.get('container_name', 'N/A')}`")
+                    st.write(f"**ID:** `{bot.get('container_id', 'N/A')[:12]}...`")
+                    st.write(f"**Full ID:** `{bot.get('container_id', 'N/A')}`")
+                    st.write(f"**Status:** {bot.get('container_status', 'N/A')}")
+                    st.write(f"**Normalized:** {bot.get('normalized_status', 'N/A')}")
+                    st.write(f"**Created:** {bot.get('created_at', 'N/A')[:19]}")
+                    
+                    st.markdown("#### Meeting Details")
+                    st.write(f"**Meeting ID:** #{bot.get('id', 'N/A')}")
+                    st.write(f"**Platform:** {bot.get('platform', 'N/A').upper()}")
+                    st.write(f"**Native Meeting ID:** {bot.get('native_meeting_id', 'N/A')}")
+                    
+                    if bot.get('labels'):
+                        st.markdown("#### Labels")
+                        for key, val in bot.get('labels', {}).items():
+                            if key.startswith('vexa.'):
+                                st.caption(f"`{key}`: {val}")
+                
+                with col2:
+                    st.markdown("#### Actions")
+                    
+                    if st.button("📋 View Logs", key=f"logs_{bot.get('container_id')}", use_container_width=True):
+                        with st.spinner("Fetching logs..."):
+                            logs = get_container_logs(bot.get('container_id', ''), tail=50)
+                            if logs:
+                                st.text_area("Container Logs (last 50 lines)", logs, height=200)
+                            else:
+                                st.error("Failed to fetch logs")
+                    
+                    if st.button("⏹️ Stop Container", key=f"stop_{bot.get('container_id')}", 
+                                type="secondary", use_container_width=True):
+                        if st.session_state.get(f"confirm_stop_{bot.get('container_id')}", False):
+                            with st.spinner("Stopping container..."):
+                                if stop_container(bot.get('container_id', '')):
+                                    st.success("✅ Container stopped!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to stop container")
+                            st.session_state[f"confirm_stop_{bot.get('container_id')}"] = False
+                        else:
+                            st.warning("Click again to confirm stop")
+                            st.session_state[f"confirm_stop_{bot.get('container_id')}"] = True
+                    
+                    if st.button("🗑️ Remove Container", key=f"remove_{bot.get('container_id')}", 
+                                type="primary", use_container_width=True):
+                        if st.session_state.get(f"confirm_remove_{bot.get('container_id')}", False):
+                            with st.spinner("Removing container..."):
+                                if remove_container(bot.get('container_id', '')):
+                                    st.success("✅ Container removed!")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to remove container")
+                            st.session_state[f"confirm_remove_{bot.get('container_id')}"] = False
+                        else:
+                            st.warning("⚠️ Click again to confirm removal")
+                            st.session_state[f"confirm_remove_{bot.get('container_id')}"] = True
+                    
+                    st.caption("⚠️ Manual actions may affect bot state")
+        
+        st.markdown("---")
+        st.markdown("### Bulk Actions")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("⏹️ Stop All Bots", type="secondary", use_container_width=True):
+                if st.session_state.get("confirm_stop_all", False):
+                    count = 0
+                    for bot in bots:
+                        if stop_container(bot.get('container_id', '')):
+                            count += 1
+                    st.success(f"✅ Stopped {count}/{len(bots)} containers")
+                    st.session_state["confirm_stop_all"] = False
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.warning("Click again to confirm")
+                    st.session_state["confirm_stop_all"] = True
+        
+        with col2:
+            if st.button("🗑️ Remove All Stopped", use_container_width=True):
+                stopped_bots = [b for b in bots if b.get('normalized_status') != 'Up']
+                if stopped_bots:
+                    count = 0
+                    for bot in stopped_bots:
+                        if remove_container(bot.get('container_id', '')):
+                            count += 1
+                    st.success(f"✅ Removed {count}/{len(stopped_bots)} containers")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.info("No stopped containers to remove")
+        
+        with col3:
+            st.metric("Running", len([b for b in bots if b.get('normalized_status') == 'Up']))
+            st.metric("Stopped", len([b for b in bots if b.get('normalized_status') != 'Up']))
 
 # Footer
 st.markdown("---")

@@ -296,6 +296,8 @@ services:
     environment:
       - API_URL=http://api-gateway:8000
       - API_KEY=${ADMIN_API_TOKEN:-token}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       api-gateway:
         condition: service_started
