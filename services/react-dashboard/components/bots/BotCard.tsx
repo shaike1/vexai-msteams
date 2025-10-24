@@ -8,6 +8,7 @@ import { StopCircle, ExternalLink, FileText } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import { useBotStore } from '@/lib/stores/botStore';
+import { useRouter } from 'next/navigation';
 
 interface BotCardProps {
   bot: Bot;
@@ -16,9 +17,10 @@ interface BotCardProps {
 export function BotCard({ bot }: BotCardProps) {
   const queryClient = useQueryClient();
   const { selectBot } = useBotStore();
+  const router = useRouter();
 
   const stopMutation = useMutation({
-    mutationFn: () => botApi.stopBot(bot.id),
+    mutationFn: () => botApi.stopBot(bot.platform, bot.native_meeting_id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bots'] });
     },
@@ -65,10 +67,10 @@ export function BotCard({ bot }: BotCardProps) {
             size="sm"
             variant="outline"
             className="flex-1"
-            onClick={() => selectBot(bot)}
+            onClick={() => router.push(`/bots/${bot.id}`)}
           >
             <FileText className="h-4 w-4 mr-1" />
-            View
+            View Details
           </Button>
           
           {bot.status === 'active' && (
