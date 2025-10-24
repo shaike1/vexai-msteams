@@ -4,6 +4,16 @@ import pandas as pd
 from datetime import datetime
 import time
 import os
+import json
+from io import StringIO, BytesIO
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    HAS_PDF = True
+except:
+    HAS_PDF = False
 
 # Configuration
 API_URL = os.getenv("API_URL", "http://localhost:18056")
@@ -56,6 +66,85 @@ def get_transcriptions(meeting_id):
         r = requests.get(f"{API_URL}/meetings/{meeting_id}/transcriptions", headers={"X-API-Key": API_KEY}, timeout=5)
         return r.json() if r.status_code == 200 else []
     except: return []
+
+def get_meeting_history():
+    """Get historical meetings from database"""
+    try:
+        r = requests.get(f"{API_URL}/meetings/history", headers={"X-API-Key": API_KEY}, timeout=5)
+        return r.json() if r.status_code == 200 else []
+    except: return []
+
+def export_transcript_txt(transcripts, bot_info):
+    """Export transcript as TXT"""
+    output = StringIO()
+    output.write(f"Vexa Transcript Export\n")
+    output.write(f"=" * 60 + "\n\n")
+    output.write(f"Meeting ID: {bot_info.get('native_meeting_id', 'N/A')}\n")
+    output.write(f"Platform: {bot_info.get('platform', 'N/A').upper()}\n")
+    output.write(f"Date: {bot_info.get('created_at', 'N/A')}\n")
+    output.write(f"Duration: {format_duration(bot_info.get('start_time'))}\n")
+    output.write(f"\n" + "=" * 60 + "\n\n")
+    
+    for i, trans in enumerate(transcripts, 1):
+        output.write(f"[{i}] {trans.get('start_time', 'N/A')}\n")
+        output.write(f"{trans.get('text', 'N/A')}\n")
+        output.write(f"Language: {trans.get('language', 'en')}\n\n")
+    
+    return output.getvalue()
+
+def export_transcript_csv(transcripts, bot_info):
+    """Export transcript as CSV"""
+    df = pd.DataFrame([{
+        'Timestamp': t.get('start_time', ''),
+        'Text': t.get('text', ''),
+        'Language': t.get('language', 'en'),
+        'Segment': i+1
+    } for i, t in enumerate(transcripts)])
+    return df.to_csv(index=False)
+
+def export_transcript_json(transcripts, bot_info):
+    """Export transcript as JSON"""
+    data = {
+        'meeting_info': {
+            'meeting_id': bot_info.get('native_meeting_id', 'N/A'),
+            'platform': bot_info.get('platform', 'N/A'),
+            'created_at': bot_info.get('created_at', 'N/A'),
+            'duration': format_duration(bot_info.get('start_time'))
+        },
+        'transcripts': transcripts,
+        'export_date': datetime.now().isoformat()
+    }
+    return json.dumps(data, indent=2)
+
+def export_transcript_pdf(transcripts, bot_info):
+    """Export transcript as PDF"""
+    if not HAS_PDF:
+        return None
+    
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+    
+    # Title
+    story.append(Paragraph("Vexa Transcript Export", styles['Title']))
+    story.append(Spacer(1, 0.2*inch))
+    
+    # Meeting info
+    story.append(Paragraph(f"<b>Meeting ID:</b> {bot_info.get('native_meeting_id', 'N/A')}", styles['Normal']))
+    story.append(Paragraph(f"<b>Platform:</b> {bot_info.get('platform', 'N/A').upper()}", styles['Normal']))
+    story.append(Paragraph(f"<b>Date:</b> {bot_info.get('created_at', 'N/A')}", styles['Normal']))
+    story.append(Paragraph(f"<b>Duration:</b> {format_duration(bot_info.get('start_time'))}", styles['Normal']))
+    story.append(Spacer(1, 0.3*inch))
+    
+    # Transcripts
+    for i, trans in enumerate(transcripts, 1):
+        story.append(Paragraph(f"<b>[{i}] {trans.get('start_time', 'N/A')}</b>", styles['Normal']))
+        story.append(Paragraph(trans.get('text', 'N/A'), styles['Normal']))
+        story.append(Spacer(1, 0.1*inch))
+    
+    doc.build(story)
+    return buffer.getvalue()
 
 def create_bot(platform, meeting_id, passcode, bot_name):
     try:
@@ -171,7 +260,7 @@ with st.sidebar:
     st.caption(f"🔗 {API_URL.split('//')[1]}")
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Bots", "➕ Deploy", "📝 Transcripts", "📊 Analytics", "🐳 Containers"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Bots", "➕ Deploy", "📝 Transcripts", "📊 Analytics", "📜 History", "🐳 Containers"])
 
 # Tab 1: Bots
 with tab1:
@@ -214,13 +303,95 @@ with tab1:
                     st.write("")
                     if st.button("📝 View", key=f"view_{bot.get('id')}", use_container_width=True):
                         st.session_state['view_bot'] = bot.get('id')
-                        st.info("→ Go to Transcripts tab")
+                        st.session_state['view_bot_data'] = bot
+                        st.switch_page
+                        st.toast(f"Viewing Bot #{bot.get('id')}", icon="📝")
+                    if st.button("🔍 Details", key=f"detail_{bot.get('id')}", use_container_width=True):
+                        st.session_state['detail_bot'] = bot
                     if st.button("🗑️ Stop", key=f"del_{bot.get('id')}", type="secondary", use_container_width=True):
-                        if delete_bot(bot.get('id')):
-                            st.success("✅ Stopped!")
-                            time.sleep(1)
-                            st.rerun()
+                        with st.spinner("Stopping bot..."):
+                            if delete_bot(bot.get('id')):
+                                st.toast("✅ Bot stopped successfully!", icon="✅")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.toast("❌ Failed to stop bot", icon="❌")
                 st.markdown("---")
+        
+        # Bot detail modal
+        if 'detail_bot' in st.session_state and st.session_state.get('detail_bot'):
+            bot = st.session_state['detail_bot']
+            with st.expander(f"🔍 Bot #{bot.get('id')} - Full Details", expanded=True):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("### 📊 Meeting Information")
+                    st.write(f"**Bot ID:** #{bot.get('id')}")
+                    st.write(f"**Platform:** {get_platform_emoji(bot.get('platform', ''))} {bot.get('platform', 'N/A').upper()}")
+                    st.write(f"**Meeting ID:** {bot.get('native_meeting_id', 'N/A')}")
+                    st.write(f"**Status:** {get_status_emoji(bot.get('status', ''))} {bot.get('status', 'N/A').title()}")
+                    st.write(f"**Created:** {bot.get('created_at', 'N/A')[:19]}")
+                    if bot.get('start_time'):
+                        st.write(f"**Duration:** {format_duration(bot.get('start_time'))}")
+                    
+                    st.markdown("### 🐳 Container Information")
+                    st.write(f"**Container Name:** `{bot.get('container_name', 'N/A')}`")
+                    st.write(f"**Container ID:** `{bot.get('container_id', 'N/A')[:12]}...`")
+                    st.write(f"**Status:** {bot.get('container_status', 'N/A')}")
+                    st.write(f"**Health:** {bot.get('normalized_status', 'N/A')}")
+                
+                with col2:
+                    st.markdown("### 📝 Transcription Stats")
+                    trans = get_transcriptions(bot.get('id'))
+                    st.metric("Total Segments", len(trans))
+                    if trans:
+                        st.metric("Latest Segment", f"{len(trans[-1].get('text', '').split())} words")
+                        langs = set([t.get('language', 'en') for t in trans])
+                        st.metric("Languages", len(langs))
+                        st.caption(f"Languages: {', '.join(langs)}")
+                    
+                    st.markdown("### 🔗 Quick Actions")
+                    if st.button("📝 View Transcripts", key="detail_view_trans", use_container_width=True):
+                        st.session_state['view_bot'] = bot.get('id')
+                        st.info("→ Switch to Transcripts tab")
+                    
+                    if st.button("📥 Export All Formats", key="detail_export", use_container_width=True):
+                        st.session_state['export_bot'] = bot.get('id')
+                        st.success("Ready to export!")
+                    
+                    if st.button("✖️ Close", key="detail_close", type="secondary", use_container_width=True):
+                        del st.session_state['detail_bot']
+                        st.rerun()
+                
+                # Export section in detail view
+                if st.session_state.get('export_bot') == bot.get('id'):
+                    st.markdown("---")
+                    st.markdown("### 📥 Export Options")
+                    trans = get_transcriptions(bot.get('id'))
+                    if trans:
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            txt_data = export_transcript_txt(trans, bot)
+                            st.download_button("📄 TXT", txt_data, f"transcript_{bot.get('id')}.txt", "text/plain", use_container_width=True)
+                        
+                        with col2:
+                            csv_data = export_transcript_csv(trans, bot)
+                            st.download_button("📊 CSV", csv_data, f"transcript_{bot.get('id')}.csv", "text/csv", use_container_width=True)
+                        
+                        with col3:
+                            json_data = export_transcript_json(trans, bot)
+                            st.download_button("🔧 JSON", json_data, f"transcript_{bot.get('id')}.json", "application/json", use_container_width=True)
+                        
+                        with col4:
+                            if HAS_PDF:
+                                pdf_data = export_transcript_pdf(trans, bot)
+                                if pdf_data:
+                                    st.download_button("📕 PDF", pdf_data, f"transcript_{bot.get('id')}.pdf", "application/pdf", use_container_width=True)
+                            else:
+                                st.caption("PDF export unavailable")
+                    else:
+                        st.info("No transcripts available yet")
 
 # Tab 2: Deploy
 with tab2:
@@ -248,53 +419,114 @@ with tab2:
         
         if st.form_submit_button("🚀 Deploy Bot", type="primary", use_container_width=True):
             if meeting_id:
-                with st.spinner("Deploying..."):
+                with st.spinner("🚀 Deploying bot to meeting..."):
                     ok, res = create_bot(platform, meeting_id, passcode, bot_name)
                     if ok:
-                        st.success(f"✅ Bot #{res.get('id')} deployed!")
                         st.balloons()
+                        st.success(f"✅ Bot #{res.get('id')} deployed successfully!")
+                        st.toast(f"Bot #{res.get('id')} is joining the meeting", icon="🤖")
                         time.sleep(2)
                         st.rerun()
                     else:
-                        st.error(f"❌ {res}")
+                        st.error(f"❌ Failed: {res}")
+                        st.toast("Deployment failed", icon="❌")
+            else:
+                st.warning("⚠️ Please enter a meeting ID")
 
 # Tab 3: Transcripts
 with tab3:
     st.subheader("📝 Live Transcripts")
     bots = get_bots()
-    active = [b for b in bots if b.get('status')=='active']
+    active = [b for b in bots if b.get('status') in ['active', 'awaiting_admission', 'joining']]
     
     if not active:
-        st.info("No active bots. Deploy one first!")
+        st.info("💡 No active bots. Deploy one from the 'Deploy' tab!")
     else:
-        sel = st.selectbox("Select Bot", [b.get('id') for b in active], format_func=lambda x: f"Bot #{x} - {next((b.get('native_meeting_id') for b in active if b.get('id')==x), 'N/A')}")
+        # Bot selector
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            sel = st.selectbox("Select Bot", [b.get('id') for b in active], 
+                             format_func=lambda x: f"Bot #{x} - {next((b.get('native_meeting_id') for b in active if b.get('id')==x), 'N/A')}")
+        with col2:
+            auto_scroll = st.checkbox("Auto-scroll", value=True)
         
         if sel:
             bot = next((b for b in active if b.get('id')==sel), None)
             if bot:
-                c1,c2,c3 = st.columns(3)
-                c1.metric("Platform", bot.get('platform','').upper())
+                # Bot stats
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Platform", f"{get_platform_emoji(bot.get('platform',''))} {bot.get('platform','').upper()}")
                 c2.metric("Duration", format_duration(bot.get('start_time')))
-                c3.metric("Status", "🟢 Active")
+                c3.metric("Status", f"{get_status_emoji(bot.get('status',''))} {bot.get('status','').title()}")
+                
+                # Get transcripts
+                trans = get_transcriptions(sel)
+                c4.metric("Segments", len(trans), delta=f"+{len(trans)}" if len(trans) > 0 else None)
                 
                 st.markdown("---")
-                trans = get_transcriptions(sel)
                 
+                # Export buttons
                 if trans:
-                    st.success(f"📝 {len(trans)} segments")
-                    if st.button("⬇️ Download"):
-                        txt = "\n\n".join([f"[{t.get('start_time')}] {t.get('text')}" for t in trans])
-                        st.download_button("📄 Download TXT", txt, f"transcript_{sel}.txt", "text/plain")
+                    st.markdown("### 📥 Export Transcript")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        txt_data = export_transcript_txt(trans, bot)
+                        st.download_button("📄 TXT", txt_data, f"transcript_{sel}.txt", "text/plain", use_container_width=True)
+                    
+                    with col2:
+                        csv_data = export_transcript_csv(trans, bot)
+                        st.download_button("📊 CSV", csv_data, f"transcript_{sel}.csv", "text/csv", use_container_width=True)
+                    
+                    with col3:
+                        json_data = export_transcript_json(trans, bot)
+                        st.download_button("🔧 JSON", json_data, f"transcript_{sel}.json", "application/json", use_container_width=True)
+                    
+                    with col4:
+                        if HAS_PDF:
+                            pdf_data = export_transcript_pdf(trans, bot)
+                            if pdf_data:
+                                st.download_button("📕 PDF", pdf_data, f"transcript_{sel}.pdf", "application/pdf", use_container_width=True)
+                        else:
+                            st.button("📕 PDF", disabled=True, use_container_width=True)
+                            st.caption("Install reportlab for PDF export")
                     
                     st.markdown("---")
-                    st.markdown("### 💬 Feed")
-                    for i,t in enumerate(reversed(trans[-50:])):
-                        with st.chat_message("assistant"):
-                            st.markdown(f"**Segment {i+1}**")
-                            st.write(t.get('text','N/A'))
-                            st.caption(f"{t.get('start_time')} · {t.get('language','en')}")
+                    
+                    # Search in transcripts
+                    search = st.text_input("🔍 Search in transcript", placeholder="Type to search...")
+                    
+                    # Transcript feed
+                    st.markdown("### 💬 Transcript Feed")
+                    
+                    # Filter by search
+                    display_trans = trans
+                    if search:
+                        display_trans = [t for t in trans if search.lower() in t.get('text', '').lower()]
+                        st.info(f"Found {len(display_trans)} matches for '{search}'")
+                    
+                    if display_trans:
+                        # Show latest 100 segments
+                        for i, t in enumerate(reversed(display_trans[-100:]), 1):
+                            with st.chat_message("assistant", avatar="🤖"):
+                                st.markdown(f"**Segment {len(display_trans) - i + 1}**")
+                                text = t.get('text', 'N/A')
+                                
+                                # Highlight search term
+                                if search and search.lower() in text.lower():
+                                    import re
+                                    text = re.sub(f'({re.escape(search)})', r'**\1**', text, flags=re.IGNORECASE)
+                                
+                                st.markdown(text)
+                                st.caption(f"🕐 {t.get('start_time', 'N/A')} · 🌍 {t.get('language', 'en').upper()}")
+                    else:
+                        st.warning(f"No matches found for '{search}'")
                 else:
-                    st.info("Waiting for audio...")
+                    st.info("⏳ Waiting for audio... The bot is in the meeting and will start transcribing once audio is detected.")
+                    if bot.get('status') == 'awaiting_admission':
+                        st.warning("⚠️ Bot is waiting to be admitted to the meeting. Please admit the bot from the meeting interface.")
+                    elif bot.get('status') == 'joining':
+                        st.info("🔄 Bot is joining the meeting...")
 
 # Tab 4: Analytics
 with tab4:
@@ -331,8 +563,77 @@ with tab4:
         df = pd.DataFrame([{'ID':b.get('id'),'Platform':b.get('platform','').upper(),'Status':b.get('status',''),'Created':b.get('created_at','')[:16]} for b in bots[-10:]])
         st.dataframe(df, use_container_width=True)
 
-# Tab 5: Container Management
+# Tab 5: History
 with tab5:
+    st.subheader("📜 Meeting History")
+    st.markdown("Complete history of all meetings and bot sessions")
+    
+    # Get all bots (active + historical)
+    bots = get_bots()
+    
+    if not bots:
+        st.info("No meeting history yet. Deploy your first bot!")
+    else:
+        # Filters
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            platform_filter = st.multiselect("Platform", ["teams", "meet", "zoom"], default=["teams", "meet", "zoom"])
+        with col2:
+            status_filter = st.multiselect("Status", ["active", "completed", "failed", "awaiting_admission", "joining"], 
+                                          default=["active", "completed", "failed"])
+        with col3:
+            search_term = st.text_input("Search Meeting ID", placeholder="Type to filter...")
+        
+        # Filter bots
+        filtered_bots = bots
+        if platform_filter:
+            filtered_bots = [b for b in filtered_bots if b.get('platform') in platform_filter]
+        if status_filter:
+            filtered_bots = [b for b in filtered_bots if b.get('status') in status_filter]
+        if search_term:
+            filtered_bots = [b for b in filtered_bots if search_term.lower() in b.get('native_meeting_id', '').lower()]
+        
+        st.markdown(f"### Found {len(filtered_bots)} meetings")
+        st.markdown("---")
+        
+        # Create DataFrame
+        history_data = []
+        for bot in filtered_bots:
+            history_data.append({
+                'ID': bot.get('id'),
+                'Platform': f"{get_platform_emoji(bot.get('platform', ''))} {bot.get('platform', '').upper()}",
+                'Meeting ID': bot.get('native_meeting_id', 'N/A'),
+                'Status': f"{get_status_emoji(bot.get('status', ''))} {bot.get('status', '').title()}",
+                'Container': bot.get('container_name', 'N/A')[:20],
+                'Created': bot.get('created_at', 'N/A')[:19],
+                'Duration': format_duration(bot.get('start_time')) if bot.get('start_time') else '0:00'
+            })
+        
+        if history_data:
+            df = pd.DataFrame(history_data)
+            
+            # Display table with selection
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            st.markdown("---")
+            st.markdown("### 📊 Statistics")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Meetings", len(filtered_bots))
+            col2.metric("Active Now", len([b for b in filtered_bots if b.get('status') == 'active']))
+            col3.metric("Completed", len([b for b in filtered_bots if b.get('status') == 'completed']))
+            col4.metric("Failed", len([b for b in filtered_bots if b.get('status') == 'failed']))
+            
+            # Export history
+            st.markdown("---")
+            st.markdown("### 📥 Export History")
+            csv_export = df.to_csv(index=False)
+            st.download_button("📊 Export as CSV", csv_export, "meeting_history.csv", "text/csv", use_container_width=True)
+        else:
+            st.info("No meetings match the current filters")
+
+# Tab 6: Container Management
+with tab6:
     st.subheader("🐳 Container Management")
     st.markdown("Real-time container status and control for Vexa bots")
     
