@@ -9,6 +9,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { formatDistanceToNow } from 'date-fns';
 import { useBotStore } from '@/lib/stores/botStore';
 import { useRouter } from 'next/navigation';
+import { useToast } from '@/components/ui/use-toast';
 
 interface BotCardProps {
   bot: Bot;
@@ -18,11 +19,24 @@ export function BotCard({ bot }: BotCardProps) {
   const queryClient = useQueryClient();
   const { selectBot } = useBotStore();
   const router = useRouter();
+  const { toast } = useToast();
 
   const stopMutation = useMutation({
     mutationFn: () => botApi.stopBot(bot.platform, bot.native_meeting_id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bots'] });
+      toast({
+        variant: "success",
+        title: "Bot Stopped",
+        description: "The bot has been stopped and will leave the meeting shortly.",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error?.response?.data?.detail || "Failed to stop bot. Please try again.",
+      });
     },
   });
 

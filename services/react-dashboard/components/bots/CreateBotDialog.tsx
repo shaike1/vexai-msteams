@@ -15,12 +15,14 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Plus } from 'lucide-react';
+import { useToast } from '@/components/ui/use-toast';
 
 export function CreateBotDialog() {
   const [open, setOpen] = useState(false);
   const [meetingUrl, setMeetingUrl] = useState('');
   const [passcode, setPasscode] = useState('');
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const createMutation = useMutation({
     mutationFn: (data: { platform: string; meeting_url: string; passcode?: string }) =>
@@ -30,6 +32,21 @@ export function CreateBotDialog() {
       setOpen(false);
       setMeetingUrl('');
       setPasscode('');
+
+      // Show success toast
+      toast({
+        variant: "success",
+        title: "Success!",
+        description: "Bot created successfully and is joining the meeting.",
+      });
+    },
+    onError: (error: any) => {
+      // Show error toast
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error?.response?.data?.detail || "Failed to create bot. Please try again.",
+      });
     },
   });
 
@@ -77,11 +94,6 @@ export function CreateBotDialog() {
               onChange={(e) => setPasscode(e.target.value)}
             />
           </div>
-          {createMutation.isError && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">
-              Failed to create bot. Please try again.
-            </div>
-          )}
           <div className="flex justify-end gap-3 pt-4">
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>
               Cancel
