@@ -133,9 +133,19 @@ const handleRedisMessage = async (message: string, channel: string, page: Page |
   log(`[DEBUG] handleRedisMessage entered for channel ${channel}. Message: ${message.substring(0, 100)}...`);
   // ++++++++++++++++++++++++++++++++++
   log(`Received command on ${channel}: ${message}`);
-  // --- ADDED: Implement reconfigure command handling --- 
+  // --- ADDED: Implement reconfigure command handling ---
   try {
       const command = JSON.parse(message);
+
+      // Validate this command is for our meeting
+      if (command.meeting_id) {
+        const meetingId = botConfig.meeting_id;
+        if (meetingId && command.meeting_id !== meetingId) {
+          log(`⚠️  Ignoring command for different meeting: command.meeting_id=${command.meeting_id}, our meeting_id=${meetingId}`);
+          return;
+        }
+      }
+
       if (command.action === 'reconfigure') {
           log(`Processing reconfigure command: Lang=${command.language}, Task=${command.task}`);
 
@@ -340,7 +350,10 @@ export async function runBot(botConfig: BotConfig): Promise<void> {
   log(`Starting bot for ${platform} with URL: ${meetingUrl}, name: ${botName}, language: ${currentLanguage}, task: ${currentTask}, connectionId: ${currentConnectionId}`);
 
   // --- ADDED: Redis Client Setup and Subscription ---
-  if (currentRedisUrl && currentConnectionId) {
+  // Use meeting_id for command channel (stable, meeting-based addressing)
+  const meetingId = botConfig.meeting_id;
+
+  if (currentRedisUrl && meetingId) {
     log("Setting up Redis subscriber...");
     try {
       redisSubscriber = createClient({ url: currentRedisUrl });
@@ -356,15 +369,16 @@ export async function runBot(botConfig: BotConfig): Promise<void> {
       await redisSubscriber.connect();
       log(`Connected to Redis at ${currentRedisUrl}`);
 
-      const commandChannel = `bot_commands:${currentConnectionId}`;
+      // Subscribe to meeting-based channel (not session-based)
+      const commandChannel = `bot_commands:meeting:${meetingId}`;
       // Pass the page object when subscribing
       // ++ MODIFIED: Add logging inside subscribe callback ++
       await redisSubscriber.subscribe(commandChannel, (message, channel) => {
           log(`[DEBUG] Redis subscribe callback fired for channel ${channel}.`); // Log before handling
           handleRedisMessage(message, channel, page)
-      }); 
+      });
       // ++++++++++++++++++++++++++++++++++++++++++++++++
-      log(`Subscribed to Redis channel: ${commandChannel}`);
+      log(`Subscribed to meeting-specific Redis channel: ${commandChannel}`);
 
     } catch (err) {
       log(`*** Failed to connect or subscribe to Redis: ${err} ***`);
@@ -373,7 +387,12 @@ export async function runBot(botConfig: BotConfig): Promise<void> {
       redisSubscriber = null; // Ensure client is null if setup failed
     }
   } else {
-    log("Redis URL or Connection ID missing, skipping Redis setup.");
+    if (!currentRedisUrl) {
+      log("Redis URL missing, skipping Redis setup.");
+    }
+    if (!meetingId) {
+      log("ERROR: meeting_id not provided in botConfig. Cannot subscribe to commands.");
+    }
   }
   // -------------------------------------------------
 

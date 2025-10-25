@@ -508,14 +508,8 @@ async def request_bot(
         asyncio.create_task(_record_session_start(meeting_id, connection_id))
         logger.info(f"Scheduled background task to record session start for meeting {meeting_id}, session {connection_id}")
 
-        # Persist (platform, native_meeting_id) -> current connectionId mapping in Redis for command routing
-        try:
-            if redis_client and connection_id:
-                mapping_key = f"bm:meeting:{req.platform.value}:{native_meeting_id}:current_uid"
-                await redis_client.set(mapping_key, connection_id, ex=24*60*60)
-                logger.info(f"[DEBUG] Stored current_uid mapping in Redis: {mapping_key} -> {connection_id}")
-        except Exception as e:
-            logger.warning(f"[DEBUG] Failed to store current_uid mapping in Redis: {e}")
+        # Redis mapping no longer needed - bot subscribes to meeting-based channel
+        # Commands are published directly to bot_commands:meeting:{meeting_id}
 
         # REMOVED: Status update to 'active' - now handled by bot startup callback
         # Only set the container ID, keep status as 'requested' until bot confirms it's running
@@ -618,35 +612,8 @@ async def update_bot_config(
     internal_meeting_id = active_meeting.id
     logger.info(f"[DEBUG] Found active meeting record with internal ID: {internal_meeting_id}")
 
-    # 2. Resolve current session_uid (connectionId) for this meeting
-    # Prefer Redis mapping written at launch; fallback to DB MeetingSession
-    original_session_uid: Optional[str] = None
-    try:
-        if redis_client:
-            mapping_key = f"bm:meeting:{platform.value}:{native_meeting_id}:current_uid"
-            cached_uid = await redis_client.get(mapping_key)
-            if isinstance(cached_uid, str) and cached_uid:
-                original_session_uid = cached_uid
-                logger.info(f"[DEBUG] Using current_uid from Redis mapping: {mapping_key} -> {original_session_uid}")
-    except Exception as e:
-        logger.warning(f"[DEBUG] Failed to read current_uid from Redis: {e}")
-
-    if not original_session_uid:
-        latest_session_stmt = select(MeetingSession.session_uid).where(
-            MeetingSession.meeting_id == internal_meeting_id
-        ).order_by(MeetingSession.session_start_time.desc()).limit(1)
-        session_result = await db.execute(latest_session_stmt)
-        original_session_uid = session_result.scalars().first()
-        logger.info(f"[DEBUG] Selected latest session UID '{original_session_uid}' for meeting {internal_meeting_id} to receive reconfigure command")
-
-    if not original_session_uid:
-        logger.error(f"Active meeting {internal_meeting_id} found, but no associated session UID. Cannot send command.")
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Meeting is active but session information is missing. Cannot process reconfiguration."
-        )
-
-    # logger.info(f"Found latest session UID {latest_session_uid} for meeting {internal_meeting_id}.") # Removed old log
+    # 2. No session UID lookup needed - use meeting_id for direct addressing!
+    # The bot subscribes to bot_commands:meeting:{meeting_id}, so we publish directly
 
     # 3. Construct and Publish command
     if not redis_client:
@@ -656,20 +623,20 @@ async def update_bot_config(
             detail="Cannot connect to internal messaging service to send command."
         )
 
+    # Publish directly to meeting-based channel (no lookup required!)
+    channel = f"bot_commands:meeting:{internal_meeting_id}"
     command_payload = {
         "action": "reconfigure",
-        "uid": original_session_uid, # Use the original UID in the payload (for the bot handler, if needed? Seems unused there now)
+        "meeting_id": internal_meeting_id,  # For validation in bot
         "language": req.language,
         "task": req.task
     }
-    # Publish to the channel the bot SUBSCRIBED to (using original UID)
-    channel = f"bot_commands:{original_session_uid}"
 
     try:
         payload_str = json.dumps(command_payload)
-        logger.info(f"Publishing command to channel '{channel}': {payload_str}")
+        logger.info(f"Publishing reconfigure command to meeting-based channel '{channel}': {payload_str}")
         await redis_client.publish(channel, payload_str)
-        logger.info(f"Successfully published reconfigure command for session {original_session_uid}.") # Log original UID
+        logger.info(f"Successfully published reconfigure command for meeting {internal_meeting_id}.")
     except Exception as e:
         logger.error(f"Failed to publish reconfigure command to Redis channel {channel}: {e}", exc_info=True)
         raise HTTPException(
@@ -774,18 +741,8 @@ async def stop_bot(
         background_tasks.add_task(run_all_tasks, meeting.id)
         return {"message": "Stop request accepted; meeting finalized immediately (pre-active)."}
 
-    # 2. Find the earliest session UID for this meeting (may not exist yet at pre-active)
-    session_stmt = select(MeetingSession.session_uid).where(
-        MeetingSession.meeting_id == meeting.id
-    ).order_by(MeetingSession.session_start_time.asc()) # Order by start time ascending
-
-    session_result = await db.execute(session_stmt)
-    earliest_session_uid = session_result.scalars().first()
-
-    if not earliest_session_uid:
-        logger.warning(f"Stop request: No session UID for meeting {meeting.id} (pre-active). Skipping leave command.")
-
-    logger.info(f"Found earliest session UID '{earliest_session_uid}' for meeting {meeting.id}. Preparing to send leave command.")
+    # 2. No session UID lookup needed - use meeting_id for direct addressing!
+    # The bot subscribes to bot_commands:meeting:{meeting_id}
 
     # 3. Publish 'leave' command via Redis Pub/Sub
     if not redis_client:
@@ -794,11 +751,15 @@ async def stop_bot(
         # Don't raise an error here, as we still want to stop the container eventually.
     else:
         try:
-            command_channel = f"bot_commands:{earliest_session_uid}"
-            payload = json.dumps({"action": "leave"})
-            logger.info(f"Publishing leave command to Redis channel '{command_channel}': {payload}")
+            # Publish directly to meeting-based channel (no lookup required!)
+            command_channel = f"bot_commands:meeting:{meeting.id}"
+            payload = json.dumps({
+                "action": "leave",
+                "meeting_id": meeting.id  # For validation in bot
+            })
+            logger.info(f"Publishing leave command to meeting-based channel '{command_channel}': {payload}")
             await redis_client.publish(command_channel, payload)
-            logger.info(f"Successfully published leave command for session {earliest_session_uid}.")
+            logger.info(f"Successfully published leave command for meeting {meeting.id}.")
         except Exception as e:
             logger.error(f"Failed to publish leave command to Redis channel {command_channel}: {e}", exc_info=True)
             # Log error but continue with delayed stop
